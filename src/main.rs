@@ -1,19 +1,8 @@
-mod auth;
-mod budget;
-mod config;
-mod limits;
-mod metrics;
-mod router;
-mod server;
-mod upstream;
-
-use std::net::SocketAddr;
-
-use axum::{Router, routing::get};
+use axum::{routing::get, Router};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use config::GatewayConfig;
+use patchbay::config::GatewayConfig;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -22,12 +11,28 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = GatewayConfig::load()?;
-    let bind: SocketAddr = cfg.listen.parse()?;
+    info!(
+        backends = cfg.backends.len(),
+        virtual_keys = cfg.virtual_keys.len(),
+        policy = ?cfg.policy,
+        "configuration loaded"
+    );
+    for b in &cfg.backends {
+        info!(
+            name = %b.name,
+            privacy = ?b.privacy,
+            models = ?b.models,
+            tags = ?b.capability_tags,
+            "backend registered"
+        );
+    }
 
+    // Endpoint assembly (chat completions proxy, auth, limits) lands in the
+    // next phase; for now the binary validates config and serves liveness.
     let app = Router::new().route("/healthz", get(healthz));
 
-    info!("patchbay listening on {bind}");
-    let listener = tokio::net::TcpListener::bind(bind).await?;
+    info!("patchbay listening on {}", cfg.listen);
+    let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
     axum::serve(listener, app).await?;
 
     Ok(())

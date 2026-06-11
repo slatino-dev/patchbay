@@ -1,49 +1,55 @@
 # patchbay example configuration
-# All sensitive values (API keys, base URLs) come from environment variables.
-# This file contains only structural/routing config — safe to commit.
+#
+# All sensitive values (API keys, base URLs, virtual keys) come from
+# environment variables — this file holds only structural/routing config and
+# is safe to commit. To run with this file, export:
+#
+#   LLM_BASE_URL      e.g. http://127.0.0.1:8000   (a local OpenAI-compatible server)
+#   OPENAI_BASE_URL   e.g. https://api.openai.com
+#   OPENAI_API_KEY    your provider key
+#   PATCHBAY_KEY_DEV  the key clients will use to call this gateway
+#
+# Missing variables are a load-time error with a message naming the variable.
 
-# Address to listen on
 listen = "0.0.0.0:8080"
 
+# Routing policy: "static_priority" (first eligible backend in file order)
+# or "ewma_latency" (lowest exponentially-weighted moving-average latency).
+[policy]
+kind = "ewma_latency"
+alpha = 0.3
+
 # ---------------------------------------------------------------------------
-# Upstream backends  (Phase B — section is parsed but not yet acted upon)
-# ---------------------------------------------------------------------------
-# [[upstreams]]
-# id = "openai-default"
-# base_url_env = "OPENAI_BASE_URL"   # e.g. export OPENAI_BASE_URL=https://api.openai.com
-# api_key_env  = "OPENAI_API_KEY"    # e.g. export OPENAI_API_KEY=sk-...
-# tags = ["cloud"]
-# weight = 10
+# Upstream backends.
 #
-# [[upstreams]]
-# id = "local-llm"
-# base_url_env = "LOCAL_LLM_BASE_URL"  # e.g. export LOCAL_LLM_BASE_URL=http://127.0.0.1:8000
-# api_key_env  = "LOCAL_LLM_API_KEY"   # e.g. export LOCAL_LLM_API_KEY=sk-local
-# tags = ["local", "private"]
-# weight = 5
+# privacy = "local"    — operator-controlled; MAY serve private traffic.
+# privacy = "external" — third-party hosted; can NEVER be selected for a
+#                        request routed as private. This is enforced in the
+#                        router's type system, not by a runtime flag check.
+# ---------------------------------------------------------------------------
+
+[[backends]]
+name = "local-llm"
+base_url_env = "LLM_BASE_URL"
+# no api_key_env: keyless LAN backend
+models = ["qwen-coder", "qwen-chat"]
+capability_tags = ["code", "fast"]
+privacy = "local"
+
+[[backends]]
+name = "openai"
+base_url_env = "OPENAI_BASE_URL"
+api_key_env = "OPENAI_API_KEY"
+models = ["gpt-4o", "gpt-4o-mini"]
+capability_tags = ["general"]
+privacy = "external"
 
 # ---------------------------------------------------------------------------
-# Privacy routing rules  (Phase B)
+# Virtual keys — gateway-issued keys clients authenticate with.
+# enforce_private = true forces ALL traffic on that key onto local backends.
 # ---------------------------------------------------------------------------
-# [routing]
-# # Requests tagged "private" or "pii" may ONLY be forwarded to local-tagged upstreams.
-# private_tags = ["private", "pii"]
 
-# ---------------------------------------------------------------------------
-# Fallback chains  (Phase B)
-# ---------------------------------------------------------------------------
-# [fallbacks]
-# default = ["local-llm", "openai-default"]
-
-# ---------------------------------------------------------------------------
-# Per-key budgets  (Phase B)
-# ---------------------------------------------------------------------------
-# [budgets]
-# [budgets.default]
-# tokens_per_day = 1_000_000
-
-# ---------------------------------------------------------------------------
-# Rate limits  (Phase B)
-# ---------------------------------------------------------------------------
-# [limits]
-# requests_per_second = 100
+[[virtual_keys]]
+name = "dev"
+key_env = "PATCHBAY_KEY_DEV"
+enforce_private = true

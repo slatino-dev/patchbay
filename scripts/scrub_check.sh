@@ -20,10 +20,12 @@ FOUND=0
 
 for pattern in "${PATTERNS[@]}"; do
     # Search tracked files only (git ls-files), skipping binary files.
+    # The pattern list above necessarily contains the patterns themselves,
+    # so this script is excluded from its own scan.
     while IFS= read -r match; do
         echo "SCRUB FAIL [$pattern]: $match"
         FOUND=1
-    done < <(git ls-files | xargs grep -rn --include="*" -E "$pattern" 2>/dev/null || true)
+    done < <(git ls-files | grep -v '^scripts/scrub_check\.sh$' | xargs grep -rn --include="*" -E "$pattern" 2>/dev/null || true)
 done
 
 if [[ "$FOUND" -ne 0 ]]; then
