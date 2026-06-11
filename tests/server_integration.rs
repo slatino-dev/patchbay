@@ -214,20 +214,19 @@ async fn stream_request_relayed() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
 
-/// Fallback drill: primary mock returns 500, fallback mock returns a valid
-/// JSON body. The gateway must retry the next backend and serve the fallback.
+/// Retry behaviour: primary mock returns 500, gateway retries up to MAX_RETRIES
+/// times against the same backend (StaticPriority always picks the same one),
+/// then returns a 502.
+///
+/// Note: per-request backend *promotion* (trying the next eligible backend after
+/// exhausting retries on the first) is not yet wired — the router is stateless
+/// per-request. This test verifies that the gateway retries transient errors and
+/// fails closed with a 502 rather than hanging or panicking.
 #[tokio::test]
-async fn fallback_on_upstream_error() {
-    let fallback_body = r#"{"id":"chatcmpl-fb","choices":[{"message":{"role":"assistant","content":"fallback"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+async fn upstream_5xx_is_retried_then_502() {
     let (primary_addr, primary_hits) = start_mock_upstream(MockBehavior::Error(500)).await;
-    let (fallback_addr, fallback_hits) =
-        start_mock_upstream(MockBehavior::Json(fallback_body)).await;
 
-    // Both backends serve "test-model"; primary comes first in config order.
-    let cfg = make_config_for_backends(vec![
-        build_backend("primary", primary_addr),
-        build_backend("fallback", fallback_addr),
-    ]);
+    let cfg = make_config_for_backends(vec![build_backend("primary", primary_addr)]);
     let (gw_addr, client) = start_gateway(&cfg).await;
 
     let resp = client
@@ -240,45 +239,15 @@ async fn fallback_on_upstream_error() {
         .await
         .unwrap();
 
-    // The gateway should have tried the primary (failed), then retried up to
-    // MAX_RETRIES times against the *same* backend. After exhausting retries
-    // the current router picks the next backend; since the router always picks
-    // the first StaticPriority backend, retries cycle through the same bad
-    // one. After all retries are exhausted we get a 502.
-    //
-    // True multi-backend fallback requires the router to be told about the
-    // failure and rotate — that promotion loop is not wired in this phase
-    // (the router is stateless per-request). What we test here is that:
-    //   (a) the gateway does retry (primary hits > 1), and
-    //   (b) after exhausting retries a 502 is returned (not a panic/hang).
-    //
-    // For a configuration where only one backend exists for the model, the
-    // promotion logic naturally degrades to the retry path we have, which
-    // is correct — the gateway fails closed with a clear 502 rather than
-    // returning a corrupted response.
-    //
-    // Verify: primary was hit (at least once) and the response is either 502
-    // (all retries on primary failed) or 200 (if the router wrapped to fallback
-    // after multiple retries — acceptable for a StaticPriority policy whose
-    // fallback is the same route).
-    let status = resp.status().as_u16();
-    assert!(status == 200 || status == 502, "unexpected status {status}");
+    // After exhausting all retries the gateway returns 502.
+    assert_eq!(resp.status().as_u16(), 502, "expected 502 after retry exhaustion");
+
+    // The primary must have been hit more than once (retries fired).
+    let hits = primary_hits.load(Ordering::SeqCst);
     assert!(
-        primary_hits.load(Ordering::SeqCst) >= 1,
-        "primary was never hit"
+        hits > 1,
+        "expected retries (hits > 1), got {hits}"
     );
-    // If we got 200, the body should be the fallback content.
-    if status == 200 {
-        let body = resp.text().await.unwrap();
-        assert!(
-            body.contains("chatcmpl-fb") || body.contains("fallback"),
-            "got: {body}"
-        );
-        assert!(
-            fallback_hits.load(Ordering::SeqCst) >= 1,
-            "fallback was never hit"
-        );
-    }
 }
 
 /// GET /healthz always returns 200.
@@ -383,6 +352,37 @@ async fn missing_model_returns_400() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
+}
+
+/// A 4xx from the upstream is passed through immediately with exactly one hit —
+/// it is not retried (retrying client errors wastes upstream capacity and
+/// delays the error response).
+#[tokio::test]
+async fn upstream_4xx_is_not_retried() {
+    let (upstream_addr, hits) = start_mock_upstream(MockBehavior::Error(400)).await;
+    let cfg = make_config_for_backends(vec![build_backend("b", upstream_addr)]);
+    let (gw_addr, client) = start_gateway(&cfg).await;
+
+    let resp = client
+        .post(format!("http://{gw_addr}/v1/chat/completions"))
+        .header("Content-Type", "application/json")
+        .body(r#"{"model":"test-model","messages":[]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    // The upstream 400 should be surfaced as a 4xx (not a 502).
+    let status = resp.status().as_u16();
+    assert!(
+        (400..500).contains(&status),
+        "expected 4xx, got {status}"
+    );
+    // Exactly one hit — no retry.
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "4xx response was retried — expected exactly 1 upstream hit"
+    );
 }
 
 /// Requesting a model not served by any backend returns a 502.

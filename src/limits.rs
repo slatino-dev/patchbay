@@ -118,8 +118,10 @@ pub struct RateLimitStore {
 struct RateLimitInner {
     /// key name -> configured limits
     limits: HashMap<String, RateLimit>,
-    /// key name -> governor RPM limiter (shared across all keys in one map)
-    rpm_limiter: Option<Arc<RpmLimiter>>,
+    /// key name -> dedicated RPM governor (one per key that has an RPM limit,
+    /// sized exactly to that key's configured quota so there is no cross-key
+    /// bleed from a shared-maximum governor).
+    rpm_limiters: HashMap<String, Arc<RpmLimiter>>,
     /// key name -> TPM rolling counter
     tpm_counters: RwLock<HashMap<String, Arc<TpmCounter>>>,
 }
@@ -135,27 +137,24 @@ impl std::fmt::Debug for RateLimitStore {
 impl RateLimitStore {
     /// Build from a per-key limits table.
     ///
-    /// All keys that have an RPM limit share a single keyed governor instance
-    /// (one cell per key, all governed by the *highest* configured RPM among
-    /// those keys — keys that are stricter reject early via the per-key check).
+    /// Each key that has an RPM limit gets its own governor instance sized
+    /// exactly to that key's quota. This ensures a key configured at 10 RPM
+    /// cannot consume more than 10 requests per minute, regardless of other
+    /// keys' limits.
     pub fn new(limits: HashMap<String, RateLimit>) -> Self {
-        // Find the maximum configured RPM to size the shared governor quota.
-        // Each key enforces its own stricter limit in check_rpm().
-        let max_rpm = limits
-            .values()
-            .filter_map(|l| l.max_rpm)
-            .max()
-            .and_then(NonZeroU32::new);
-
-        let rpm_limiter = max_rpm.map(|rpm| {
-            let quota = Quota::per_minute(rpm);
-            Arc::new(GovernorLimiter::keyed(quota))
-        });
+        let rpm_limiters: HashMap<String, Arc<RpmLimiter>> = limits
+            .iter()
+            .filter_map(|(name, limit)| {
+                let rpm = NonZeroU32::new(limit.max_rpm?)?;
+                let quota = Quota::per_minute(rpm);
+                Some((name.clone(), Arc::new(GovernorLimiter::keyed(quota))))
+            })
+            .collect();
 
         Self {
             inner: Arc::new(RateLimitInner {
                 limits,
-                rpm_limiter,
+                rpm_limiters,
                 tpm_counters: RwLock::new(HashMap::new()),
             }),
         }
@@ -199,8 +198,8 @@ impl RateLimitStore {
             None => return Ok(()),
             Some(r) => r,
         };
-        // Governor's keyed limiter tracks per-key state internally.
-        if let Some(rl) = &self.inner.rpm_limiter {
+        // Each key has its own governor sized to its exact quota.
+        if let Some(rl) = self.inner.rpm_limiters.get(key) {
             if rl.check_key(&key.to_string()).is_err() {
                 return Err(LimitExceeded::Rpm { limit: rpm });
             }
@@ -337,5 +336,61 @@ mod tests {
         store.record_tpm("k", 50).unwrap();
         store.record_tpm("k", 30).unwrap();
         assert_eq!(store.current_tpm("k"), 80);
+    }
+
+    /// A key with a 1-RPM limit must be rejected after the burst is consumed.
+    /// This tests the rejection path which was previously untested.
+    #[test]
+    fn rpm_rejects_after_burst_exhausted() {
+        // 1 RPM = the governor allows exactly 1 request per minute.
+        // The GCRA burst capacity for N/min is N (one token); the first
+        // request consumes it and the second is rejected immediately.
+        let store = store_with(
+            "k",
+            RateLimit {
+                max_rpm: Some(1),
+                max_tpm: None,
+            },
+        );
+        // First request must pass.
+        assert!(store.check_rpm("k").is_ok(), "first request should pass");
+        // Subsequent request in the same window must be rejected.
+        let err = store.check_rpm("k");
+        assert!(
+            matches!(err, Err(LimitExceeded::Rpm { limit: 1 })),
+            "second request should be rejected, got: {err:?}"
+        );
+    }
+
+    /// A lower-RPM key must not borrow capacity from a higher-RPM key on the
+    /// same store.
+    #[test]
+    fn rpm_keys_are_independent() {
+        let mut m = HashMap::new();
+        m.insert(
+            "low".to_string(),
+            RateLimit {
+                max_rpm: Some(1),
+                max_tpm: None,
+            },
+        );
+        m.insert(
+            "high".to_string(),
+            RateLimit {
+                max_rpm: Some(120),
+                max_tpm: None,
+            },
+        );
+        let store = RateLimitStore::new(m);
+
+        // Exhaust the low-RPM key.
+        assert!(store.check_rpm("low").is_ok());
+        assert!(matches!(
+            store.check_rpm("low"),
+            Err(LimitExceeded::Rpm { .. })
+        ));
+
+        // The high-RPM key must still be available.
+        assert!(store.check_rpm("high").is_ok());
     }
 }

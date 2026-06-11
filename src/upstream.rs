@@ -354,6 +354,26 @@ pub enum UpstreamError {
     },
 }
 
+impl UpstreamError {
+    /// Returns `true` if retrying this error makes sense: 5xx responses,
+    /// 429 Too Many Requests, and connection-level failures are transient.
+    /// 4xx client errors (other than 429) will not resolve on retry.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Http(_) => true,
+            Self::BadStatus { status, .. } => *status == 429 || *status >= 500,
+        }
+    }
+
+    /// The upstream HTTP status code, if this was a `BadStatus` error.
+    pub fn upstream_status(&self) -> Option<u16> {
+        match self {
+            Self::BadStatus { status, .. } => Some(*status),
+            Self::Http(_) => None,
+        }
+    }
+}
+
 /// Thin client for OpenAI-compatible upstreams. One instance is shared
 /// across all backends (reqwest pools per-host internally).
 #[derive(Debug, Clone)]

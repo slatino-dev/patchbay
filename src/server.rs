@@ -9,13 +9,16 @@
 //! | GET    | /healthz                 | Liveness probe — always 200 OK           |
 //! | GET    | /metrics                 | Prometheus text-format metrics           |
 //!
-//! # Fallback + retry
+//! # Retry
 //!
 //! Before the first upstream byte is written to the client, transient errors
-//! (upstream non-2xx, connection failure) trigger jittered exponential
-//! backoff retries against the same backend, then promotion to the next
-//! eligible backend. Once the relay has started streaming (first byte sent),
-//! no retry is possible — the error propagates to the client.
+//! (5xx status codes, 429 Too Many Requests, connection failures) trigger
+//! jittered exponential backoff retries against the same backend. 4xx errors
+//! are not retried — they are passed through immediately with the upstream
+//! body, because client-side errors will not resolve on retry.
+//!
+//! Once the relay has started streaming (first byte sent), no retry is
+//! possible — the error propagates to the client.
 //!
 //! # Non-stream requests
 //!
@@ -28,7 +31,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Extension, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -124,7 +127,6 @@ struct CompletionRequest {
 pub async fn chat_completions(
     State(state): State<AppState>,
     AuthedKey(identity): AuthedKey,
-    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     // --- Rate limiting ---
@@ -190,6 +192,17 @@ pub async fn chat_completions(
             Err(e) => {
                 warn!(backend = %backend.name, attempt, "upstream error: {e}");
                 state.metrics.record_upstream_error(&backend.name);
+
+                // 4xx errors (except 429) are client-side mistakes that will
+                // not resolve on retry; pass the upstream status through.
+                if !e.is_retryable() {
+                    let http_status = e
+                        .upstream_status()
+                        .and_then(|s| StatusCode::from_u16(s).ok())
+                        .unwrap_or(StatusCode::BAD_GATEWAY);
+                    return error_response(http_status, "upstream_error", &e.to_string());
+                }
+
                 last_err = Some(e);
                 continue;
             }
@@ -223,7 +236,6 @@ pub async fn chat_completions(
                 model.clone(),
                 resp,
                 content_type,
-                headers,
             )
             .await;
         } else {
@@ -247,7 +259,6 @@ async fn stream_response(
     model: String,
     resp: reqwest::Response,
     content_type: header::HeaderValue,
-    _client_headers: HeaderMap,
 ) -> Response {
     let (relay, summary_rx) = SseRelay::from_response(resp, STALL_TIMEOUT);
 
