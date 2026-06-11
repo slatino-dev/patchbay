@@ -1,8 +1,8 @@
-use axum::{routing::get, Router};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use patchbay::config::GatewayConfig;
+use patchbay::server::{build_router, AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -27,17 +27,23 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Endpoint assembly (chat completions proxy, auth, limits) lands in the
-    // next phase; for now the binary validates config and serves liveness.
-    let app = Router::new().route("/healthz", get(healthz));
+    let state = AppState::from_config(&cfg)?;
+    let app = build_router(state);
 
     info!("patchbay listening on {}", cfg.listen);
     let listener = tokio::net::TcpListener::bind(cfg.listen).await?;
-    axum::serve(listener, app).await?;
+
+    // Graceful shutdown on SIGINT (Ctrl-C).
+    let shutdown = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl-C handler");
+        info!("shutdown signal received");
+    };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
 
     Ok(())
-}
-
-async fn healthz() -> axum::http::StatusCode {
-    axum::http::StatusCode::OK
 }

@@ -10,9 +10,14 @@
 //! - [`upstream`] — byte-faithful SSE relay over a streaming HTTP client,
 //!   with usage interception for accounting, stall detection, and client
 //!   disconnect propagation.
-//!
-//! The remaining modules ([`auth`], [`budget`], [`limits`], [`metrics`],
-//! [`server`]) are scaffolding for the next phase (HTTP endpoint assembly).
+//! - [`auth`] — virtual API-key lookup and axum extractor.
+//! - [`budget`] — per-key token-budget accounting with periodic JSON
+//!   snapshots for restart survival.
+//! - [`limits`] — per-key RPM/TPM enforcement via `governor` (GCRA).
+//! - [`metrics`] — Prometheus text-format counters exposed on `GET /metrics`.
+//! - [`server`] — axum routes: `POST /v1/chat/completions` (stream + non-stream
+//!   proxy with jittered backoff + fallback), `GET /v1/models`, `GET /healthz`,
+//!   `GET /metrics`.
 
 pub mod auth;
 pub mod budget;
