@@ -70,6 +70,9 @@ jobs:
       - name: Test
         run: cargo test --all-targets
 
+      - name: Doctests (includes compile_fail proofs)
+        run: cargo test --doc
+
   scrub:
     name: Scrub check
     runs-on: ubuntu-latest
