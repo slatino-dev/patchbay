@@ -240,14 +240,15 @@ async fn upstream_5xx_is_retried_then_502() {
         .unwrap();
 
     // After exhausting all retries the gateway returns 502.
-    assert_eq!(resp.status().as_u16(), 502, "expected 502 after retry exhaustion");
+    assert_eq!(
+        resp.status().as_u16(),
+        502,
+        "expected 502 after retry exhaustion"
+    );
 
     // The primary must have been hit more than once (retries fired).
     let hits = primary_hits.load(Ordering::SeqCst);
-    assert!(
-        hits > 1,
-        "expected retries (hits > 1), got {hits}"
-    );
+    assert!(hits > 1, "expected retries (hits > 1), got {hits}");
 }
 
 /// GET /healthz always returns 200.
@@ -373,10 +374,7 @@ async fn upstream_4xx_is_not_retried() {
 
     // The upstream 400 should be surfaced as a 4xx (not a 502).
     let status = resp.status().as_u16();
-    assert!(
-        (400..500).contains(&status),
-        "expected 4xx, got {status}"
-    );
+    assert!((400..500).contains(&status), "expected 4xx, got {status}");
     // Exactly one hit — no retry.
     assert_eq!(
         hits.load(Ordering::SeqCst),
