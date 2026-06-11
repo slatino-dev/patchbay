@@ -1,0 +1,23 @@
+/target/
+Cargo.lock
+*.orig
+*.bk
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Bench artifacts
+bench/results/tmp/
+criterion/
+
+# Secrets — never commit
+.env
+*.env
+*.pem
+*.key

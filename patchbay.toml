@@ -1,0 +1,49 @@
+# patchbay example configuration
+# All sensitive values (API keys, base URLs) come from environment variables.
+# This file contains only structural/routing config — safe to commit.
+
+# Address to listen on
+listen = "0.0.0.0:8080"
+
+# ---------------------------------------------------------------------------
+# Upstream backends  (Phase B — section is parsed but not yet acted upon)
+# ---------------------------------------------------------------------------
+# [[upstreams]]
+# id = "openai-default"
+# base_url_env = "OPENAI_BASE_URL"   # e.g. export OPENAI_BASE_URL=https://api.openai.com
+# api_key_env  = "OPENAI_API_KEY"    # e.g. export OPENAI_API_KEY=sk-...
+# tags = ["cloud"]
+# weight = 10
+#
+# [[upstreams]]
+# id = "local-llm"
+# base_url_env = "LOCAL_LLM_BASE_URL"  # e.g. export LOCAL_LLM_BASE_URL=http://127.0.0.1:8000
+# api_key_env  = "LOCAL_LLM_API_KEY"   # e.g. export LOCAL_LLM_API_KEY=sk-local
+# tags = ["local", "private"]
+# weight = 5
+
+# ---------------------------------------------------------------------------
+# Privacy routing rules  (Phase B)
+# ---------------------------------------------------------------------------
+# [routing]
+# # Requests tagged "private" or "pii" may ONLY be forwarded to local-tagged upstreams.
+# private_tags = ["private", "pii"]
+
+# ---------------------------------------------------------------------------
+# Fallback chains  (Phase B)
+# ---------------------------------------------------------------------------
+# [fallbacks]
+# default = ["local-llm", "openai-default"]
+
+# ---------------------------------------------------------------------------
+# Per-key budgets  (Phase B)
+# ---------------------------------------------------------------------------
+# [budgets]
+# [budgets.default]
+# tokens_per_day = 1_000_000
+
+# ---------------------------------------------------------------------------
+# Rate limits  (Phase B)
+# ---------------------------------------------------------------------------
+# [limits]
+# requests_per_second = 100
